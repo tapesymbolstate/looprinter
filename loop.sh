@@ -25,6 +25,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+if command -v python3 &>/dev/null; then
+    PYTHON=python3
+elif command -v python &>/dev/null; then
+    PYTHON=python
+else
+    echo "Error: python3 or python is required but not found in PATH."
+    exit 1
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ARG PARSING
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -141,9 +150,24 @@ POST_PHASES=()
 
 verify() {
     echo "── VERIFY ──"
+    local errors=()
 
     if [ ! -d "output" ] || [ -z "$(ls output/ 2>/dev/null)" ]; then
-        BUILD_ERRORS="No output files found."
+        errors+=("No output files found.")
+    fi
+
+    if [[ ! -f "$PLAN_FILE" ]]; then
+        errors+=("plan.json not found.")
+    elif ! $PYTHON -c "import json; json.load(open('$PLAN_FILE'))" 2>/dev/null; then
+        errors+=("plan.json is not valid JSON.")
+    fi
+
+    if [[ ! -f "$PROGRESS_FILE" ]] || [[ ! -s "$PROGRESS_FILE" ]]; then
+        errors+=("progress.txt missing or empty.")
+    fi
+
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        BUILD_ERRORS=$(printf '%s\n' "${errors[@]}")
         echo "FAIL: $BUILD_ERRORS"
         return 1
     fi
@@ -178,20 +202,55 @@ spawn_agent() {
             --model "$model" \
             2>&1 || true
     else
-        claude -p \
+        local raw
+        raw=$(claude -p \
             --model "${CLAUDE_MODEL:-opus}" \
             --effort "${CLAUDE_EFFORT:-max}" \
             --permission-mode bypassPermissions \
             --dangerously-skip-permissions \
-            --output-format stream-json \
-            "$prompt" 2>&1 || true
+            --verbose --output-format stream-json \
+            "$prompt" < /dev/null 2>&1 || true)
+        # Extract assistant text messages from stream-json
+        echo "$raw" | $PYTHON -c "
+import sys, json
+texts = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        obj = json.loads(line)
+    except: continue
+    if obj.get('type') == 'assistant':
+        msg = obj.get('message', {})
+        for block in msg.get('content', []):
+            if block.get('type') == 'text':
+                texts.append(block['text'])
+print('\n'.join(texts))
+" 2>/dev/null
     fi
 }
 
-log() { echo "$*" | tee -a "$RECORD_FILE"; }
+log() { echo "$*"; }
+
+log_record() {
+    local phase="$1"
+    local content="$2"
+    echo "$content"
+    printf '%s' "$content" | $PYTHON -c "
+import json, sys, datetime
+entry = {
+    'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'cycle': $CYCLE,
+    'iteration': $ITERATION,
+    'phase': sys.argv[1],
+    'output': sys.stdin.read()
+}
+print(json.dumps(entry))
+" "$phase" >> "$RECORD_FILE"
+}
 
 has_incomplete_tasks() {
-    [[ -f "$PLAN" ]] && python3 -c "
+    [[ -f "$PLAN" ]] && $PYTHON -c "
 import json, sys
 d = json.load(open('$PLAN'))
 tasks = d.get('userStories', d.get('tasks', []))
@@ -200,7 +259,7 @@ sys.exit(0 if any(not t.get('passes') and not t.get('done') for t in tasks) else
 }
 
 all_tasks_done() {
-    [[ -f "$PLAN" ]] && python3 -c "
+    [[ -f "$PLAN" ]] && $PYTHON -c "
 import json, sys
 d = json.load(open('$PLAN'))
 tasks = d.get('userStories', d.get('tasks', []))
@@ -231,7 +290,7 @@ run_post_phases() {
 
             local result
             result=$(spawn_agent "$prompt")
-            log "$result"
+            log_record "$phase_name" "$result"
 
             if grep -q "$signal_done" <<< "$result"; then
                 log "${phase_name} complete."
@@ -273,7 +332,7 @@ while true; do
         fi
 
         OUTPUT=$(spawn_agent "$PLAN_PROMPT")
-        log "$OUTPUT"
+        log_record "plan" "$OUTPUT"
 
         if [[ ! -f "$PLAN" ]]; then
             log "Error: plan phase did not produce $PLAN"
@@ -300,9 +359,9 @@ while true; do
         log "── build C${CYCLE}.${ITERATION} ($(date '+%H:%M:%S')) ──"
 
         OUTPUT=$(spawn_agent "$BUILD_PROMPT")
-        log "$OUTPUT"
+        log_record "build" "$OUTPUT"
 
-        if grep -qi 'rate.limit\|429\|too many requests\|overloaded' <<< "$OUTPUT"; then
+        if tail -5 <<< "$OUTPUT" | grep -qi 'rate_limit\|rate limit\|"status": *429\|too many requests\|overloaded'; then
             log "Rate limited. Waiting 60s..."
             sleep 60
             ITERATION=$((ITERATION - 1))
