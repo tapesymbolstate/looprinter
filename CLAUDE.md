@@ -45,7 +45,7 @@ Copy `loop.sh` and edit these functions:
 - `gen_plan_prompt()` — planning phase prompt
 - `gen_build_prompt()` — build phase prompt
 - `gen_replan_prompt()` — recovery prompt after verify failure
-- `verify()` — quality gate (exit 0 = pass)
+- `verify()` — quality gate (exit 0 = pass); default checks plan.json tasks and progress.txt
 - `setup()` — one-time preprocessing
 - `POST_PHASES` + `gen_<name>_prompt()` — optional phases after verify passes
 

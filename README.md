@@ -45,6 +45,25 @@ The main agent reads `working-records/` from background loops, then **improves t
 └─────────────────────────────────────────────┘
 ```
 
+### 5. Exact Cycle Contract
+
+`loop.sh` enforces a strict cycle order:
+
+1. `setup()` runs once, then the cycle starts.
+2. `Plan` runs when `output/plan.json` is missing or when all tasks are already complete.
+3. `Build` runs and repeatedly executes exactly one task per iteration.
+4. `Verify` checks required artifacts and schema invariants.
+5. On verify fail, the loop archives `output/plan.json` as `working-records/plan_cycle_<N>.json`, removes it, then re-plans next cycle with errors.
+6. On verify pass, configured post-phases run and then the loop exits.
+
+The build contract is one-task-per-iteration:
+
+- read `output/plan.json` and `output/progress.txt` first
+- execute the first remaining task where `passes` is `false`
+- mark that single task as `passes: true`
+- append cumulative findings to `output/progress.txt`
+- finish the build iteration
+
 ## Structure
 
 ```
@@ -52,6 +71,13 @@ loop.sh              — self-contained loop template (prompts + engine in one f
 working-records/     — JSONL logs from loop iterations (gitignored)
 output/              — runtime artifacts produced by the loop (gitignored)
 ```
+
+## Artifact Contract
+
+- `output/plan.json` — object containing `tasks` array; each task has `id`, `title`, `description`, `targetFile`, `passes`, and `notes`.
+- `output/progress.txt` — cumulative findings and notes; must be non-empty for `verify()`.
+- `working-records/*.jsonl` — line-delimited records for each phase/output cycle.
+- `working-records/plan_cycle_*.json` — archived snapshots of `output/plan.json` when verify fails.
 
 ## Usage
 

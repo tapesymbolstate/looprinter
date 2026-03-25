@@ -60,10 +60,7 @@ PROGRESS="$PROGRESS_FILE"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 RECORDS_DIR="working-records"
-mkdir -p "$RECORDS_DIR" output
-
-RECORD_FILE="$RECORDS_DIR/$(date '+%Y-%m-%d-%H%M%S')-$TOOL.jsonl"
-echo "Record: $RECORD_FILE"
+RECORD_FILE=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROMPTS — edit these functions to customize the harness
@@ -73,19 +70,32 @@ gen_plan_prompt() {
     cat <<'PROMPT_EOF'
 You are a planning agent. Read the project context and create a task plan.
 
+## Context
+1. Read `output/progress.txt` first; do not duplicate work already marked as done.
+2. Keep tasks minimal and directly tied to the current cycle objective.
+
 ## Job
-1. Analyze what needs to be done
-2. Generate `output/plan.json` with schema:
+1. Read what has been completed and what remains from `output/progress.txt`.
+2. Generate `output/plan.json` with exact JSON only (no markdown fences, no preface, no explanation).
+3. Tasks must be ordered by execution priority so build can finish them in array order.
+4. Ensure every task includes all required fields and `passes` is initially `false` for unfinished work.
+
+Schema:
    ```json
    {
      "tasks": [
        { "id": "T-001", "title": "...", "description": "...",
-         "targetFile": "output/...", "passes": false, "notes": "" }
+         "targetFile": "loop.sh", "passes": false, "notes": "..." }
      ]
    }
    ```
-3. Write `output/progress.txt` with initial findings
 
+5. Overwrite `output/plan.json` each run with the complete task list.
+6. Include one clear `<promise>PLAN_COMPLETE</promise>` signal only when schema is fully written.
+
+## Rules
+- Use stable, unique IDs.
+- Use explicit ordering in the task array for build execution.
 ## Completion
 When done, output: <promise>PLAN_COMPLETE</promise>
 PROMPT_EOF
@@ -105,7 +115,15 @@ $build_errors
 
 ## Job
 1. Read \`output/progress.txt\` for context on what was already done
-2. Generate a NEW \`output/plan.json\` for cycle $cycle_num
+2. Generate a NEW \`output/plan.json\` for cycle $cycle_num with schema:
+   \`\`\`json
+   {
+     "tasks": [
+       { "id": "T-001", "title": "...", "description": "...",
+         "targetFile": "output/...", "passes": false, "notes": "" }
+     ]
+   }
+   \`\`\`
 3. Fix the issues from the previous cycle
 4. Append cycle notes to \`output/progress.txt\`
 
@@ -123,14 +141,22 @@ You are a build agent. Execute one task from the plan.
 2. `output/progress.txt` — cumulative findings
 
 ## Workflow
-1. Read `output/plan.json`, find the first task where `passes` is `false`
-2. Execute that task
-3. Update `output/plan.json`: set `passes: true` for completed task
-4. Append progress to `output/progress.txt`
+1. Read `output/plan.json` and find the first task where `passes` is `false` (by array order).
+2. Execute exactly that one task and do not modify any other task state.
+3. Update only the matching task in `output/plan.json` to `passes: true`.
+4. Append concise progress to `output/progress.txt` naming:
+   - completed task id
+   - what changed
+   - any notable decisions or risks
+5. If ALL tasks in `tasks` now have `passes: true`, output `<promise>CYCLE_DONE</promise>`.
+6. If tasks remain incomplete, stop after this one task.
 
 ## Rules
 - ONE task per iteration
 - Update the plan JSON after completing each task
+- Do not reorder tasks.
+- Do not add extra non-task tasks.
+- If there are no incomplete tasks, output `<promise>CYCLE_DONE</promise>` immediately.
 
 ## Completion
 If ALL tasks have `passes: true`, output: <promise>CYCLE_DONE</promise>
@@ -158,8 +184,109 @@ verify() {
 
     if [[ ! -f "$PLAN_FILE" ]]; then
         errors+=("plan.json not found.")
-    elif ! $PYTHON -c "import json; json.load(open('$PLAN_FILE'))" 2>/dev/null; then
-        errors+=("plan.json is not valid JSON.")
+    else
+        local plan_report=""
+        local plan_rc=0
+        local task_count=0
+        local complete_count=0
+        local incomplete_count=0
+        local incomplete_ids=""
+
+        plan_report=$(
+$PYTHON - "$PLAN_FILE" <<'PY'
+import json
+import re
+import sys
+
+plan_path = sys.argv[1]
+errors = []
+
+try:
+    with open(plan_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except json.JSONDecodeError as exc:
+    errors.append(f"plan.json is not valid JSON: {exc}")
+else:
+    if not isinstance(data, dict):
+        errors.append("plan.json top-level value must be an object.")
+    else:
+        tasks = data.get("tasks")
+        if not isinstance(tasks, list):
+            errors.append("plan.json requires a 'tasks' array.")
+        elif not tasks:
+            errors.append("plan.json requires a non-empty tasks array.")
+        else:
+            task_ids = []
+            required = ("id", "title", "description", "targetFile", "passes", "notes")
+            for idx, task in enumerate(tasks, 1):
+                if not isinstance(task, dict):
+                    errors.append(f"Task #{idx} is not an object.")
+                    continue
+                for key in required:
+                    if key not in task:
+                        errors.append(f"Task #{idx} missing field '{key}'.")
+                if "id" in task and not isinstance(task["id"], str):
+                    errors.append(f"Task #{idx} field 'id' must be a string.")
+                elif "id" in task and isinstance(task["id"], str):
+                    if not task["id"].strip():
+                        errors.append(f"Task #{idx} field 'id' must be a non-empty string.")
+                    elif task["id"] in task_ids:
+                        errors.append(f"Duplicate task id '{task['id']}' at Task #{idx}.")
+                    elif not re.match(r"^T-\d{3,}$", task["id"]):
+                        errors.append(f"Task #{idx} field 'id' should follow pattern 'T-###'.")
+                    else:
+                        task_ids.append(task["id"])
+                if "title" in task and not isinstance(task["title"], str):
+                    errors.append(f"Task #{idx} field 'title' must be a string.")
+                elif "title" in task and not task["title"].strip():
+                    errors.append(f"Task #{idx} field 'title' must be a non-empty string.")
+                if "description" in task and not isinstance(task["description"], str):
+                    errors.append(f"Task #{idx} field 'description' must be a string.")
+                elif "description" in task and not task["description"].strip():
+                    errors.append(f"Task #{idx} field 'description' must be a non-empty string.")
+                if "targetFile" in task and not isinstance(task["targetFile"], str):
+                    errors.append(f"Task #{idx} field 'targetFile' must be a string.")
+                elif "targetFile" in task and not task["targetFile"].strip():
+                    errors.append(f"Task #{idx} field 'targetFile' must be a non-empty string.")
+                if "notes" in task and not isinstance(task["notes"], str):
+                    errors.append(f"Task #{idx} field 'notes' must be a string.")
+                if "passes" in task and not isinstance(task["passes"], bool):
+                    errors.append(f"Task #{idx} field 'passes' must be true or false.")
+                if "passes" in task and isinstance(task["passes"], bool) and task["passes"] and "targetFile" in task and not isinstance(task["targetFile"], str):
+                    errors.append(f"Task #{idx} passes=true but targetFile type is invalid; cannot validate completion state.")
+
+if errors:
+    print("\n".join(errors))
+    raise SystemExit(1)
+
+total_tasks = len(tasks)
+complete_tasks = [t for t in tasks if isinstance(t, dict) and t.get("passes", False)]
+incomplete_tasks = [t for t in tasks if isinstance(t, dict) and not t.get("passes", False)]
+
+print(f"PLAN_TASK_COUNT={total_tasks}")
+print(f"PLAN_TASK_COMPLETE={len(complete_tasks)}")
+print(f"PLAN_TASK_INCOMPLETE={len(incomplete_tasks)}")
+print("PLAN_INCOMPLETE_IDS=" + ",".join(
+    str(task.get("id", f"#{idx + 1}"))
+    for idx, task in enumerate(incomplete_tasks)
+))
+PY
+        )
+        plan_rc=$?
+        if [[ $plan_rc -ne 0 ]]; then
+            errors+=("$plan_report")
+        else
+            task_count=$(printf '%s\n' "$plan_report" | awk -F= '/^PLAN_TASK_COUNT=/{print $2}')
+            complete_count=$(printf '%s\n' "$plan_report" | awk -F= '/^PLAN_TASK_COMPLETE=/{print $2}')
+            incomplete_count=$(printf '%s\n' "$plan_report" | awk -F= '/^PLAN_TASK_INCOMPLETE=/{print $2}')
+            incomplete_ids=$(printf '%s\n' "$plan_report" | awk -F= '/^PLAN_INCOMPLETE_IDS=/{print $2}')
+        fi
+
+        if [[ $plan_rc -eq 0 && -n "$incomplete_count" && "$incomplete_count" -gt 0 ]]; then
+            errors+=("Incomplete tasks (${incomplete_count}/${task_count}): ${incomplete_ids}")
+        elif [[ -n "$task_count" && "$task_count" -eq 0 ]]; then
+            errors+=("plan.json has no tasks.")
+        fi
     fi
 
     if [[ ! -f "$PROGRESS_FILE" ]] || [[ ! -s "$PROGRESS_FILE" ]]; then
@@ -183,7 +310,23 @@ verify() {
 
 setup() {
     echo "── SETUP ──"
-    mkdir -p output
+    mkdir -p output "$RECORDS_DIR"
+
+    PLAN_FILE="$WORK_DIR/plan.json"
+    PROGRESS_FILE="$WORK_DIR/progress.txt"
+    PROGRESS="$PROGRESS_FILE"
+    PLAN="$PLAN_FILE"
+
+    RECORD_FILE="$RECORDS_DIR/$(date '+%Y-%m-%d-%H%M%S')-loop-$TOOL.jsonl"
+    touch "$PLAN_FILE" "$PROGRESS_FILE" "$RECORD_FILE"
+    if [[ ! -s "$PLAN_FILE" ]]; then
+        printf '%s\n' '{"tasks":[]}' > "$PLAN_FILE"
+    fi
+    if [[ ! -s "$PROGRESS_FILE" ]]; then
+        printf '%s\n' "Loop runner initialized at $(date '+%Y-%m-%dT%H:%M:%SZ')." > "$PROGRESS_FILE"
+    fi
+    echo "Record: $RECORD_FILE"
+
     echo "Ready."
 }
 
@@ -202,59 +345,24 @@ spawn_agent() {
             --model "$model" \
             2>&1 || true
     else
-        local raw
-        raw=$(claude -p \
+        claude -p \
             --model "${CLAUDE_MODEL:-opus}" \
             --effort "${CLAUDE_EFFORT:-max}" \
             --permission-mode bypassPermissions \
             --dangerously-skip-permissions \
             --verbose --output-format stream-json \
-            "$prompt" < /dev/null 2>&1 || true)
-        # Extract assistant text messages from stream-json
-        echo "$raw" | $PYTHON -c "
-import sys, json
-texts = []
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    try:
-        obj = json.loads(line)
-    except: continue
-    if obj.get('type') == 'assistant':
-        msg = obj.get('message', {})
-        for block in msg.get('content', []):
-            if block.get('type') == 'text':
-                texts.append(block['text'])
-print('\n'.join(texts))
-" 2>/dev/null
+            "$prompt" < /dev/null 2>&1 || true
     fi
 }
 
 log() { echo "$*"; }
 
-log_record() {
-    local phase="$1"
-    local content="$2"
-    echo "$content"
-    printf '%s' "$content" | $PYTHON -c "
-import json, sys, datetime
-entry = {
-    'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    'cycle': $CYCLE,
-    'iteration': $ITERATION,
-    'phase': sys.argv[1],
-    'output': sys.stdin.read()
-}
-print(json.dumps(entry))
-" "$phase" >> "$RECORD_FILE"
-}
-
 has_incomplete_tasks() {
     [[ -f "$PLAN" ]] && $PYTHON -c "
 import json, sys
 d = json.load(open('$PLAN'))
-tasks = d.get('userStories', d.get('tasks', []))
-sys.exit(0 if any(not t.get('passes') and not t.get('done') for t in tasks) else 1)
+tasks = d.get('tasks', [])
+sys.exit(0 if any(not t.get('passes', False) for t in tasks) else 1)
 " 2>/dev/null
 }
 
@@ -262,8 +370,8 @@ all_tasks_done() {
     [[ -f "$PLAN" ]] && $PYTHON -c "
 import json, sys
 d = json.load(open('$PLAN'))
-tasks = d.get('userStories', d.get('tasks', []))
-sys.exit(0 if tasks and all(t.get('passes') or t.get('done') for t in tasks) else 1)
+tasks = d.get('tasks', [])
+sys.exit(0 if tasks and all(t.get('passes', False) for t in tasks) else 1)
 " 2>/dev/null
 }
 
@@ -284,13 +392,15 @@ run_post_phases() {
         local signal_done="${phase_name^^}_DONE"
         local signal_progress="${phase_name^^}_PROGRESS"
 
+        RECORD_FILE="$RECORDS_DIR/$(date '+%Y-%m-%d-%H%M%S')-${phase_name}-$TOOL.jsonl"
+
         while true; do
             step=$((step + 1))
             log "step $step ($(date '+%H:%M:%S'))"
 
             local result
             result=$(spawn_agent "$prompt")
-            log_record "$phase_name" "$result"
+            echo "$result" | tee -a "$RECORD_FILE"
 
             if grep -q "$signal_done" <<< "$result"; then
                 log "${phase_name} complete."
@@ -332,7 +442,7 @@ while true; do
         fi
 
         OUTPUT=$(spawn_agent "$PLAN_PROMPT")
-        log_record "plan" "$OUTPUT"
+        echo "$OUTPUT" | tee -a "$RECORD_FILE"
 
         if [[ ! -f "$PLAN" ]]; then
             log "Error: plan phase did not produce $PLAN"
@@ -359,7 +469,7 @@ while true; do
         log "── build C${CYCLE}.${ITERATION} ($(date '+%H:%M:%S')) ──"
 
         OUTPUT=$(spawn_agent "$BUILD_PROMPT")
-        log_record "build" "$OUTPUT"
+        echo "$OUTPUT" | tee -a "$RECORD_FILE"
 
         if tail -5 <<< "$OUTPUT" | grep -qi 'rate_limit\|rate limit\|"status": *429\|too many requests\|overloaded'; then
             log "Rate limited. Waiting 60s..."
