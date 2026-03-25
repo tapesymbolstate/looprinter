@@ -1,23 +1,21 @@
-# harness-factory
+# looprinter
 
-A toolkit for building loop-based agent harnesses. The harness is the product, not the code the agent writes.
+A loop template for building iterative agent harnesses. Copy `loop.sh`, edit the prompts, run it.
 
-## How It Works
+## Core Concepts
 
 ### 1. Ralph Loop
-
-The foundation is a simple loop that runs an AI agent repeatedly until the work is done:
 
 ```
 while true:
     Plan → Build → Verify → (fail? re-plan) → ... → Done
 ```
 
-Each iteration starts a fresh agent with a clean context window. State lives in the filesystem, not in the agent's memory. The loop handles phase transitions, error recovery, and rate limiting. All phases — prompts, verification gates, post-processing — live in a single `.sh` file.
+Each iteration starts a fresh agent with a clean context window. State lives in the filesystem, not in the agent's memory. All phases — prompts, verification gates, post-processing — live in a single `.sh` file.
 
 ### 2. Headless Agent Execution
 
-The loop runs agents in **headless mode** (`claude -p`, `codex exec`) from inside a main Claude Code session. The main agent spawns background loops as tasks or cronjobs. This means:
+The loop runs agents in **headless mode** (`codex exec`, `claude -p`) from inside a main Claude Code session. The main agent spawns background loops as tasks or cronjobs. This means:
 
 - The loop runs autonomously — no human in the loop
 - The main agent stays free to observe, analyze, and intervene
@@ -25,24 +23,11 @@ The loop runs agents in **headless mode** (`claude -p`, `codex exec`) from insid
 
 ### 3. Working Records
 
-Every agent iteration appends to a working record (JSONL in `working-records/`). These records capture:
+Every agent iteration appends to a working record (JSONL in `working-records/`). Records capture what the agent attempted, what failed, and what changed. The agent's context window is disposable — the working record is not.
 
-- What the agent attempted
-- What it found, what failed, what changed
-- Agent stdout from each iteration
+### 4. Cronjob-Driven Double Loop
 
-Records are the loop's persistent memory. The agent's context window is disposable — it resets every iteration. The working record is not. It accumulates signal across hundreds of runs.
-
-### 4. Continuous Harness Improvement
-
-The main agent reads the working records and stdout from background loops, then **improves the harness itself**:
-
-- Identifies failure patterns from accumulated records
-- Edits prompt functions to address recurring issues
-- Adjusts verification gates based on observed quality
-- Tunes phase transitions based on what's actually working
-
-This creates a **double loop**: the inner loop does the work, the outer loop (the main agent) improves how the work gets done. The harness gets better with every run without manual intervention.
+The main agent reads `working-records/` from background loops, then **improves the harness itself**:
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -52,8 +37,8 @@ This creates a **double loop**: the inner loop does the work, the outer loop (th
 │       ▲                         │           │
 │       │                         ▼           │
 │  ┌────┴────────────────────────────────┐    │
-│  │  Background Loop (headless)         │    │
-│  │  Plan → Build → Verify → re-plan   │    │
+│  │  Background Loop (cronjob/task)     │    │
+│  │  Plan → Build → Verify → re-plan    │    │
 │  │       │                             │    │
 │  │       └──► writes working-records/  │    │
 │  └─────────────────────────────────────┘    │
@@ -63,7 +48,7 @@ This creates a **double loop**: the inner loop does the work, the outer loop (th
 ## Structure
 
 ```
-loop.sh              — self-contained loop harness (prompts + engine in one file)
+loop.sh              — self-contained loop template (prompts + engine in one file)
 working-records/     — JSONL logs from loop iterations (gitignored)
 output/              — runtime artifacts produced by the loop (gitignored)
 ```
@@ -72,10 +57,12 @@ output/              — runtime artifacts produced by the loop (gitignored)
 
 ```bash
 # Run directly
-./loop.sh claude 50
+./loop.sh codex 50
+./loop.sh codex-spark
+./loop.sh claude 30
 
-# Run in background from a main Claude Code session
-# (using tasks/cronjobs to monitor working-records/)
+# Run as background task from a main Claude Code session
+# The main agent monitors working-records/ and edits loop.sh to improve the harness
 ```
 
 ## Building a New Harness

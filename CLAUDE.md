@@ -2,60 +2,55 @@
 
 ## What This Project Is
 
-harness-factory builds loop-based agent harnesses. A harness = prompts + phases + verification gates + working records. The loop engine (`loop.sh`) is generic; domain logic lives in config directories under `configs/`.
+looprinter is a loop template repository. `loop.sh` is a self-contained template for building any kind of iterative agent harness. Copy it, edit the prompt functions, run it.
 
 ## Architecture
 
 ```
-loop.sh                  — generic loop engine (Plan → Build → Verify → cycle)
-configs/<name>/          — harness configs (prompt generators, verify scripts)
-output/                  — runtime artifacts (plan, progress, source, records)
-output/records/          — working records (JSONL logs, archived plans)
-tmp/                     — reference documents on harness/context engineering
+loop.sh              — the template (prompts + engine in one file)
+working-records/     — JSONL logs per run [gitignored]
+output/              — runtime artifacts (plan.json, progress.txt) [gitignored]
 ```
 
-## Working Records Are Sacred
+## Core Concepts
 
-Every design decision in this project optimizes for working record quality. Records are the loop's persistent memory — they survive context resets and compound across iterations. When building or modifying a harness:
+### 1. Headless Mode
+
+The loop spawns agents in headless mode (`codex exec`, `claude -p`). Each iteration is a fresh agent with a clean context window. State lives in the filesystem, not in agent memory.
+
+### 2. Working Records
+
+Every iteration appends to a JSONL record file in `working-records/`. Records are the loop's persistent memory — they survive context resets and compound across iterations.
 
 - Every agent iteration MUST append to the record file
-- Records use JSONL format, one entry per iteration
-- Include: what the agent attempted, what it found, what failed, what changed
 - Never truncate or overwrite records mid-run
 
-## The Double Loop
+### 3. Cronjob / Background Execution
 
-The primary workflow is a double loop:
+The intended workflow: a main Claude Code session launches `loop.sh` as a background task or cronjob, then observes `working-records/` and stdout to improve the harness.
 
-1. **Inner loop** — `loop.sh` runs a harness in the background (via Claude Code task/cronjob)
-2. **Outer loop** — a separate Claude Code session observes working records + stdout and improves the harness configs
+```
+Main Claude Code session
+  ├── launches loop.sh as cronjob/task (inner loop)
+  ├── reads working-records/ to detect failure patterns
+  └── edits loop.sh prompt functions (outer loop)
+```
 
-When building harness improvement features, always design for this pattern. The observer needs:
-- Real-time access to working records and stdout
-- Ability to edit config files that the inner loop reads on next iteration
-- Failure pattern detection from accumulated records
+The inner loop does the work. The outer loop (main agent) improves how the work gets done.
 
-## How to Build a New Harness
+## Building a New Harness
 
-A harness config directory needs these files:
+Copy `loop.sh` and edit these functions:
 
-| File | Required | Purpose |
-|------|----------|---------|
-| `plan.prompt.sh` | yes | Outputs the PLAN phase prompt to stdout |
-| `build.prompt.sh` | yes | Outputs the BUILD phase prompt to stdout |
-| `verify.sh` | yes | Verification gate. Exit 0 = pass. Write errors to `$WORK_DIR/build_errors.txt` on failure |
-| `setup.sh` | no | One-time pre-loop initialization |
-| `replan.prompt.sh` | no | Re-plan prompt after verify failure. Falls back to `plan.prompt.sh` |
-| `post_N_<name>.prompt.sh` | no | Post-loop phases, run in order after verify passes |
-
-Each `.prompt.sh` script receives env vars: `CYCLE`, `ITERATION`, `WORK_DIR`, `PLAN_FILE`, `PROGRESS_FILE`, `BUILD_ERRORS`, `TOOL`, `CONFIG_DIR`.
-
-Agent completion signals use `<promise>` tags: `PLAN_COMPLETE`, `CYCLE_DONE`, `<NAME>_DONE`, `<NAME>_PROGRESS`.
+- `gen_plan_prompt()` — planning phase prompt
+- `gen_build_prompt()` — build phase prompt
+- `gen_replan_prompt()` — recovery prompt after verify failure
+- `verify()` — quality gate (exit 0 = pass)
+- `setup()` — one-time preprocessing
+- `POST_PHASES` + `gen_<name>_prompt()` — optional phases after verify passes
 
 ## Rules
 
-- Keep prompt scripts focused — one responsibility per phase
-- Verification gates must be fast and deterministic (no LLM calls in verify.sh)
+- Keep prompt functions focused — one responsibility per phase
+- Verification gates must be fast and deterministic (no LLM calls in verify)
 - Prompts reference file paths the agent can read, not inline data
-- Config directories are self-contained — no cross-config dependencies
-- Reference docs in `tmp/` are read-only context, not runtime dependencies

@@ -1,15 +1,18 @@
 #!/bin/bash
 # Ralph Loop — iterative agent harness
 #
-# Usage: ./loop.sh <config_dir> [claude|codex] [max_iterations]
-#        ./loop.sh [claude|codex] [max_iterations]  (embedded prompts)
+# Usage: ./loop.sh [codex|codex-spark|claude] [max_iterations]
 #
-# Model selection via env vars:
-#   CLAUDE_MODEL=opus ./loop.sh claude        — use Claude Opus
-#   CLAUDE_MODEL=haiku ./loop.sh claude       — use Claude Haiku
-#   CLAUDE_EFFORT=max ./loop.sh claude        — max effort
-#   CODEX_MODEL=o3 ./loop.sh codex             — use Codex with o3
-#   ./loop.sh codex                           — use Codex default model
+# Tools:
+#   codex       — Codex CLI with gpt-5.4 (default)
+#   codex-spark — Codex CLI with gpt-5.3-codex-spark (fast)
+#   claude      — Claude Code with opus (CLAUDE_MODEL=sonnet for Sonnet)
+#
+# Examples:
+#   ./loop.sh codex 50              — gpt-5.4, max 50 iterations
+#   ./loop.sh codex-spark           — spark, unlimited
+#   ./loop.sh claude 30             — Claude opus, max 30
+#   CLAUDE_MODEL=sonnet ./loop.sh claude — Claude sonnet
 #
 # Workflow:
 #   Setup  → run once before the loop (optional preprocessing)
@@ -17,18 +20,7 @@
 #   Build  → iterate through plan tasks, one per agent call
 #   Verify → check if output meets quality gates
 #   If verify fails → archive plan, re-plan with error context, goto Build
-#   If verify passes → run post-phases (restructure, wiring, etc.) → done
-#
-# Config dir files:
-#   plan.prompt.sh        — outputs plan prompt to stdout (required)
-#   build.prompt.sh       — outputs build prompt to stdout (required)
-#   verify.sh             — exit 0 = pass, exit 1 = fail (required)
-#   setup.sh              — one-time setup (optional)
-#   replan.prompt.sh      — re-plan prompt; falls back to plan.prompt.sh (optional)
-#   post_N_<name>.prompt.sh — post-loop phases, run in sort order (optional)
-#
-# Env vars exported to config scripts:
-#   CYCLE, ITERATION, WORK_DIR, PLAN_FILE, PROGRESS_FILE, BUILD_ERRORS, TOOL, CONFIG_DIR
+#   If verify passes → run post-phases → done
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -37,14 +29,8 @@ cd "$(dirname "$0")"
 # ARG PARSING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-CONFIG_DIR=""
-
-if [[ -n "${1:-}" && -d "${1:-}" ]]; then
-    CONFIG_DIR="$(cd "$1" && pwd)"; shift
-fi
-
-TOOL="claude"
-if [[ "${1:-}" =~ ^(claude|codex)$ ]]; then
+TOOL="codex"
+if [[ "${1:-}" =~ ^(codex|codex-spark|claude)$ ]]; then
     TOOL="$1"; shift
 fi
 
@@ -57,7 +43,6 @@ WORK_DIR="output"
 PLAN_FILE="$WORK_DIR/plan.json"
 PROGRESS_FILE="$WORK_DIR/progress.txt"
 
-# Aliases used throughout the engine
 PLAN="$PLAN_FILE"
 PROGRESS="$PROGRESS_FILE"
 
@@ -72,19 +57,10 @@ RECORD_FILE="$RECORDS_DIR/$(date '+%Y-%m-%d-%H%M%S')-$TOOL.jsonl"
 echo "Record: $RECORD_FILE"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PROMPTS — config-dir mode or embedded fallback
+# PROMPTS — edit these functions to customize the harness
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_export_env() {
-    export CYCLE ITERATION WORK_DIR PLAN_FILE PROGRESS_FILE BUILD_ERRORS TOOL CONFIG_DIR
-}
-
 gen_plan_prompt() {
-    if [[ -n "$CONFIG_DIR" && -x "$CONFIG_DIR/plan.prompt.sh" ]]; then
-        _export_env
-        bash "$CONFIG_DIR/plan.prompt.sh"
-        return
-    fi
     cat <<'PROMPT_EOF'
 You are a planning agent. Read the project context and create a task plan.
 
@@ -110,17 +86,6 @@ gen_replan_prompt() {
     local cycle_num="$1"
     local build_errors="$2"
 
-    if [[ -n "$CONFIG_DIR" ]]; then
-        _export_env
-        local script=""
-        [[ -x "$CONFIG_DIR/replan.prompt.sh" ]] && script="$CONFIG_DIR/replan.prompt.sh"
-        [[ -z "$script" && -x "$CONFIG_DIR/plan.prompt.sh" ]] && script="$CONFIG_DIR/plan.prompt.sh"
-        if [[ -n "$script" ]]; then
-            bash "$script"
-            return
-        fi
-    fi
-
     cat <<PROMPT_EOF
 You are a planning agent running cycle $cycle_num. The previous cycle had issues.
 
@@ -141,11 +106,6 @@ PROMPT_EOF
 }
 
 gen_build_prompt() {
-    if [[ -n "$CONFIG_DIR" && -x "$CONFIG_DIR/build.prompt.sh" ]]; then
-        _export_env
-        bash "$CONFIG_DIR/build.prompt.sh"
-        return
-    fi
     cat <<'PROMPT_EOF'
 You are a build agent. Execute one task from the plan.
 
@@ -170,45 +130,10 @@ PROMPT_EOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# POST PHASES — discovered from post_N_<name>.prompt.sh or embedded functions
+# POST PHASES — define gen_<name>_prompt() functions and add names to POST_PHASES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Embedded post-phase prompt functions (legacy / no-config mode).
-# In config-dir mode, post phases come from post_N_*.prompt.sh files.
-# gen_restructure_prompt() { ... }
-# gen_wiring_prompt() { ... }
-
 POST_PHASES=()
-
-_load_post_phases() {
-    if [[ -n "$CONFIG_DIR" ]]; then
-        while IFS= read -r f; do
-            local base name
-            base="$(basename "$f")"
-            # post_N_<name>.prompt.sh → <name>
-            name="${base%.prompt.sh}"
-            name="${name#post_*_}"
-            POST_PHASES+=("$name")
-        done < <(find "$CONFIG_DIR" -maxdepth 1 -name 'post_[0-9]*_*.prompt.sh' | sort)
-    fi
-}
-
-_gen_post_phase_prompt() {
-    local phase_name="$1"
-    if [[ -n "$CONFIG_DIR" ]]; then
-        local script
-        script="$(find "$CONFIG_DIR" -maxdepth 1 -name "post_*_${phase_name}.prompt.sh" | sort | head -1)"
-        if [[ -n "$script" && -x "$script" ]]; then
-            _export_env
-            bash "$script"
-            return
-        fi
-    fi
-    local fn="gen_${phase_name}_prompt"
-    if type "$fn" &>/dev/null; then
-        $fn
-    fi
-}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VERIFY — exit 0 = pass, exit 1 = fail
@@ -217,24 +142,6 @@ _gen_post_phase_prompt() {
 verify() {
     echo "── VERIFY ──"
 
-    if [[ -n "$CONFIG_DIR" && -x "$CONFIG_DIR/verify.sh" ]]; then
-        _export_env
-        if bash "$CONFIG_DIR/verify.sh"; then
-            BUILD_ERRORS=""
-            echo "PASS"
-            return 0
-        else
-            if [[ -f "$WORK_DIR/build_errors.txt" ]]; then
-                BUILD_ERRORS="$(cat "$WORK_DIR/build_errors.txt")"
-            else
-                BUILD_ERRORS="Verification failed."
-            fi
-            echo "FAIL: $BUILD_ERRORS"
-            return 1
-        fi
-    fi
-
-    # Embedded fallback
     if [ ! -d "output" ] || [ -z "$(ls output/ 2>/dev/null)" ]; then
         BUILD_ERRORS="No output files found."
         echo "FAIL: $BUILD_ERRORS"
@@ -253,13 +160,7 @@ verify() {
 setup() {
     echo "── SETUP ──"
     mkdir -p output
-
-    if [[ -n "$CONFIG_DIR" && -x "$CONFIG_DIR/setup.sh" ]]; then
-        _export_env
-        bash "$CONFIG_DIR/setup.sh"
-    else
-        echo "Ready."
-    fi
+    echo "Ready."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -268,16 +169,21 @@ setup() {
 
 spawn_agent() {
     local prompt="$1"
-    if [[ "$TOOL" == "codex" ]]; then
-        local codex_args=(--dangerously-bypass-approvals-and-sandbox --json)
-        [[ -n "${CODEX_MODEL:-}" ]] && codex_args+=(-m "$CODEX_MODEL")
-        echo "$prompt" | codex exec "${codex_args[@]}" \
+    if [[ "$TOOL" == "codex" || "$TOOL" == "codex-spark" ]]; then
+        local model="${CODEX_MODEL:-gpt-5.4}"
+        [[ "$TOOL" == "codex-spark" ]] && model="gpt-5.3-codex-spark"
+        echo "$prompt" | codex exec \
+            --full-auto \
+            --json \
+            --model "$model" \
             2>&1 || true
     else
         claude -p \
-            --model "${CLAUDE_MODEL:-sonnet}" \
-            --effort "${CLAUDE_EFFORT:-high}" \
+            --model "${CLAUDE_MODEL:-opus}" \
+            --effort "${CLAUDE_EFFORT:-max}" \
+            --permission-mode bypassPermissions \
             --dangerously-skip-permissions \
+            --output-format stream-json \
             "$prompt" 2>&1 || true
     fi
 }
@@ -303,16 +209,19 @@ sys.exit(0 if tasks and all(t.get('passes') or t.get('done') for t in tasks) els
 }
 
 run_post_phases() {
+    [[ ${#POST_PHASES[@]} -eq 0 ]] && return 0
     for phase_name in "${POST_PHASES[@]}"; do
         log ""
         log "── ${phase_name^^} ──"
 
         local prompt step=0
-        prompt=$(_gen_post_phase_prompt "$phase_name")
-        if [[ -z "$prompt" ]]; then
-            log "Warning: no prompt for phase $phase_name, skipping"
+        local fn="gen_${phase_name}_prompt"
+        if ! type "$fn" &>/dev/null; then
+            log "Warning: no prompt function for phase $phase_name, skipping"
             continue
         fi
+        prompt=$($fn)
+
         local signal_done="${phase_name^^}_DONE"
         local signal_progress="${phase_name^^}_PROGRESS"
 
@@ -341,7 +250,6 @@ run_post_phases() {
 # RUN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_load_post_phases
 setup
 
 while true; do
