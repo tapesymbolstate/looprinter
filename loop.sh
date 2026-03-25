@@ -379,7 +379,9 @@ run_post_phases() {
     [[ ${#POST_PHASES[@]} -eq 0 ]] && return 0
     for phase_name in "${POST_PHASES[@]}"; do
         log ""
-        log "── ${phase_name^^} ──"
+        local phase_upper
+        phase_upper=$(echo "$phase_name" | tr '[:lower:]' '[:upper:]')
+        log "── ${phase_upper} ──"
 
         local prompt step=0
         local fn="gen_${phase_name}_prompt"
@@ -389,8 +391,8 @@ run_post_phases() {
         fi
         prompt=$($fn)
 
-        local signal_done="${phase_name^^}_DONE"
-        local signal_progress="${phase_name^^}_PROGRESS"
+        local signal_done="${phase_upper}_DONE"
+        local signal_progress="${phase_upper}_PROGRESS"
 
         RECORD_FILE="$RECORDS_DIR/$(date '+%Y-%m-%d-%H%M%S')-${phase_name}-$TOOL.jsonl"
 

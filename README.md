@@ -67,9 +67,10 @@ The build contract is one-task-per-iteration:
 ## Structure
 
 ```
-loop.sh              — self-contained loop template (prompts + engine in one file)
-working-records/     — JSONL logs from loop iterations (gitignored)
-output/              — runtime artifacts produced by the loop (gitignored)
+loop.sh                              — self-contained loop template (prompts + engine in one file)
+working-records/                     — JSONL logs from loop iterations (gitignored)
+output/                              — runtime artifacts produced by the loop (gitignored)
+.claude/skills/looprinter-interview/ — interactive harness configuration skill
 ```
 
 ## Artifact Contract
@@ -93,7 +94,9 @@ output/              — runtime artifacts produced by the loop (gitignored)
 
 ## Building a New Harness
 
-Copy `loop.sh` and edit the functions:
+Use the `/looprinter-interview` skill to interactively configure a harness — it interviews you about your objective, then generates the prompt functions and verify() gate directly into `loop.sh`.
+
+Or manually copy `loop.sh` and edit the functions:
 
 - `gen_plan_prompt()` — what the planning agent should do
 - `gen_build_prompt()` — what the build agent should do per task

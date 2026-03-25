@@ -1,7 +1,7 @@
 ---
 name: looprinter-interview
 description: Interview the user about what a loop harness should accomplish, then generate the prompt functions and verify() gate directly into loop.sh. Use when the user wants to configure a new loop task, or says "looprinter-interview", "new loop", or "loop interview".
-allowed-tools: Read, Write, Edit, Grep, Glob, AskUserQuestion
+allowed-tools: Read, Edit, Grep, Glob, AskUserQuestion
 ---
 
 # looprinter-interview
@@ -20,7 +20,7 @@ From a single interview session, produce these functions in `loop.sh`:
 | `gen_build_prompt()` | Objective context + one-task-per-iteration contract. |
 | `gen_replan_prompt()` | Objective + previous errors + recovery instructions. |
 | `verify()` | Programmatic quality gate. Exit 0 = pass, exit 1 = fail. |
-| `POST_PHASES` + `gen_<name>_prompt()` | Optional post-verify phases. |
+| `POST_PHASES` + `gen_<name>_prompt()` | Optional post-verify phases (see POST_PHASES section below). |
 
 ## Interview Process
 
@@ -186,7 +186,7 @@ You are a build agent. Execute one task from the plan.
 ## Rules
 - ONE task per iteration.
 - Actually create/modify the target files — do not just toggle passes.
-{any constraints from interview}
+{constraints from interview, or remove this line if none}
 
 ## Completion
 If ALL tasks have `passes: true`, output: <promise>CYCLE_DONE</promise>
@@ -243,7 +243,7 @@ Note: `## Objective` and `## Deliverables` must be identical to gen_plan_prompt(
 **Edit strategy**: append deliverable checks AFTER the existing plan validation block, BEFORE the final error report. The insertion point is:
 
 ```bash
-    # ← existing plan validation ends here (line ~290 in current loop.sh)
+    # ← existing plan validation ends here
 
     if [[ ! -f "$PROGRESS_FILE" ]] || [[ ! -s "$PROGRESS_FILE" ]]; then
         errors+=("progress.txt missing or empty.")
@@ -286,6 +286,36 @@ What to insert depends on the interview:
 
 Combine as needed. The key principle: **keep everything above the insertion point unchanged**.
 
+### POST_PHASES (optional)
+
+If the interview reveals a need for post-verify phases (e.g., E2E testing, deployment, reporting), configure them:
+
+```bash
+POST_PHASES=("e2e" "report")
+
+gen_e2e_prompt() {
+    cat <<'PROMPT_EOF'
+You are an E2E testing agent. {describe what to test}
+
+## Completion
+If all tests pass, output: <promise>E2E_DONE</promise>
+If tests fail, describe what failed and output: <promise>E2E_PROGRESS</promise>
+PROMPT_EOF
+}
+```
+
+**Signal naming convention** (critical):
+- Phase name in `POST_PHASES` array must be lowercase: `"e2e"`, `"report"`
+- Prompt function must be named `gen_<name>_prompt()`: `gen_e2e_prompt()`, `gen_report_prompt()`
+- Done signal is `<promise>PHASENAME_DONE</promise>` (UPPERCASED): `E2E_DONE`, `REPORT_DONE`
+- Progress signal is `<promise>PHASENAME_PROGRESS</promise>`: `E2E_PROGRESS`, `REPORT_PROGRESS`
+- The engine uppercases the phase name automatically to construct signal names
+
+**Caveats**:
+- Each post-phase runs in a `while true` loop until the done signal is received. Consider adding a max-step guard in the prompt.
+- Post-phases use `spawn_agent()` so the agent has full tool access (including MCP tools in claude mode).
+- codex sandbox may block network operations (port binding, etc.) — use claude mode for phases that need network access.
+
 ## Post-Interview: Confirm Before Editing
 
 After all interview stages, present a summary using AskUserQuestion:
@@ -312,7 +342,7 @@ When writing to `loop.sh`:
 3. **Preserve** the engine section (everything below `# ENGINE`) untouched.
 4. **Preserve** the SETUP section unless the objective requires setup changes.
 5. **Preserve** the Python plan validator inside verify() — only append deliverable checks.
-6. **Clean** `output/` and `working-records/` after writing so the next run starts fresh.
+6. **Clean** `output/` after writing so the next run starts fresh. Ask the user before cleaning `working-records/` — it contains persistent run history.
 
 ### Function boundaries in loop.sh
 

@@ -7,9 +7,10 @@ looprinter is a loop template repository. `loop.sh` is a self-contained template
 ## Architecture
 
 ```
-loop.sh              — the template (prompts + engine in one file)
-working-records/     — JSONL logs per run [gitignored]
-output/              — runtime artifacts (plan.json, progress.txt) [gitignored]
+loop.sh                              — the template (prompts + engine in one file)
+working-records/                     — JSONL logs per run [gitignored]
+output/                              — runtime artifacts (plan.json, progress.txt) [gitignored]
+.claude/skills/looprinter-interview/ — interactive harness configuration skill
 ```
 
 ## Core Concepts
@@ -40,7 +41,9 @@ The inner loop does the work. The outer loop (main agent) improves how the work 
 
 ## Building a New Harness
 
-Copy `loop.sh` and edit these functions:
+Use `/looprinter-interview` to interactively configure a harness — it interviews you about your objective, then writes the prompt functions and verify() gate directly into `loop.sh`.
+
+Or manually copy `loop.sh` and edit these functions:
 
 - `gen_plan_prompt()` — planning phase prompt
 - `gen_build_prompt()` — build phase prompt
