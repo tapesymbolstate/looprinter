@@ -340,7 +340,8 @@ spawn_agent() {
         local model="${CODEX_MODEL:-gpt-5.4}"
         [[ "$TOOL" == "codex-spark" ]] && model="gpt-5.3-codex-spark"
         echo "$prompt" | codex exec \
-            --full-auto \
+            --sandbox danger-full-access \
+            -a never \
             --json \
             --model "$model" \
             2>&1 || true
