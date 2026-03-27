@@ -14,6 +14,11 @@
 #   ./loop.sh claude 30             — Claude opus, max 30
 #   CLAUDE_MODEL=sonnet ./loop.sh claude — Claude sonnet
 #
+# Rate limit gate (all tools):
+#   RATE_LIMIT_THRESHOLD=80 ./loop.sh claude       — stop when 5h usage ≥ 80% (default)
+#   RATE_LIMIT_THRESHOLD=50 ./loop.sh codex-spark  — more conservative
+#   RATE_LIMIT_THRESHOLD=0  ./loop.sh codex        — disable gate
+#
 # Workflow:
 #   Setup  → run once before the loop (optional preprocessing)
 #   Plan   → generate a task plan (plan.json)
@@ -47,6 +52,11 @@ MAX_ITERATIONS=${1:-0}
 ITERATION=0
 CYCLE=0
 BUILD_ERRORS=""
+
+# Rate limit gate — stop when Claude 5h utilization exceeds threshold (0=disabled)
+RATE_LIMIT_THRESHOLD=${RATE_LIMIT_THRESHOLD:-80}
+RATE_LIMIT_CACHE=""  # set per-tool in setup
+RATE_LIMIT_CACHE_TTL=60
 
 WORK_DIR="output"
 PLAN_FILE="$WORK_DIR/plan.json"
@@ -317,6 +327,7 @@ setup() {
     PROGRESS="$PROGRESS_FILE"
     PLAN="$PLAN_FILE"
 
+    RATE_LIMIT_CACHE="/tmp/.loop_rate_limit_cache_${TOOL}"
     RECORD_FILE="$RECORDS_DIR/$(date '+%Y-%m-%d-%H%M%S')-loop-$TOOL.jsonl"
     touch "$PLAN_FILE" "$PROGRESS_FILE" "$RECORD_FILE"
     if [[ ! -s "$PLAN_FILE" ]]; then
@@ -374,6 +385,91 @@ d = json.load(open('$PLAN'))
 tasks = d.get('tasks', [])
 sys.exit(0 if tasks and all(t.get('passes', False) for t in tasks) else 1)
 " 2>/dev/null
+}
+
+_fetch_claude_usage() {
+    local token
+    token=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
+        | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+    [[ -z "$token" ]] && return 1
+    local resp
+    resp=$(curl -s --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "Content-Type: application/json")
+    if echo "$resp" | jq -e '.five_hour' >/dev/null 2>&1; then
+        # normalize to common schema: { pct, resets_at }
+        echo "$resp" | jq '{
+            pct: (.five_hour.utilization // 0 | floor),
+            resets_at: (.five_hour.resets_at // null)
+        }' > "$RATE_LIMIT_CACHE"
+    fi
+}
+
+_fetch_codex_usage() {
+    local auth_file="$HOME/.codex/auth.json"
+    [[ ! -f "$auth_file" ]] && return 1
+    local token
+    token=$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null)
+    [[ -z "$token" ]] && return 1
+    local resp
+    resp=$(curl -s --max-time 5 "https://chatgpt.com/backend-api/wham/usage" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json")
+    echo "$resp" | jq -e '.rate_limit' >/dev/null 2>&1 || return 1
+
+    if [[ "$TOOL" == "codex-spark" ]]; then
+        # spark has its own limit in additional_rate_limits
+        echo "$resp" | jq '{
+            pct: ((.additional_rate_limits // [] | map(select(.metered_feature == "codex_bengalfox")) | .[0].rate_limit.primary_window.used_percent) // .rate_limit.primary_window.used_percent // 0),
+            resets_at: ((.additional_rate_limits // [] | map(select(.metered_feature == "codex_bengalfox")) | .[0].rate_limit.primary_window.reset_at) // .rate_limit.primary_window.reset_at // null)
+        }' > "$RATE_LIMIT_CACHE"
+    else
+        echo "$resp" | jq '{
+            pct: (.rate_limit.primary_window.used_percent // 0),
+            resets_at: (.rate_limit.primary_window.reset_at // null)
+        }' > "$RATE_LIMIT_CACHE"
+    fi
+}
+
+check_rate_limit() {
+    [[ "$RATE_LIMIT_THRESHOLD" -eq 0 ]] && return 0
+
+    local now
+    now=$(date +%s)
+
+    # refresh cache if stale
+    if [[ ! -f "$RATE_LIMIT_CACHE" ]] || \
+       [[ $(( now - $(stat -f %m "$RATE_LIMIT_CACHE" 2>/dev/null || echo 0) )) -gt $RATE_LIMIT_CACHE_TTL ]]; then
+        if [[ "$TOOL" == "claude" ]]; then
+            _fetch_claude_usage
+        else
+            _fetch_codex_usage
+        fi
+    fi
+
+    if [[ -f "$RATE_LIMIT_CACHE" ]]; then
+        local pct
+        pct=$(jq -r '.pct // 0' "$RATE_LIMIT_CACHE" 2>/dev/null)
+        local resets_at
+        resets_at=$(jq -r '.resets_at // empty' "$RATE_LIMIT_CACHE" 2>/dev/null)
+
+        # format reset time: ISO string or unix epoch
+        local reset_display="$resets_at"
+        if [[ "$resets_at" =~ ^[0-9]+$ ]]; then
+            reset_display=$(date -r "$resets_at" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$resets_at")
+        fi
+
+        if [[ -n "$pct" && "$pct" -ge "$RATE_LIMIT_THRESHOLD" ]]; then
+            log "⛔ Rate limit gate: 5h usage at ${pct}% (threshold: ${RATE_LIMIT_THRESHOLD}%)"
+            [[ -n "$resets_at" ]] && log "   Resets at: $reset_display"
+            log "   Stopping loop to preserve quota."
+            return 1
+        fi
+        log "   5h usage: ${pct}% (threshold: ${RATE_LIMIT_THRESHOLD}%)"
+    fi
+
+    return 0
 }
 
 run_post_phases() {
@@ -434,6 +530,11 @@ while true; do
 
     # ── PLAN ──────────────────────────────────────────────────────────────
 
+    if ! check_rate_limit; then
+        log "Record: $RECORD_FILE"
+        exit 0
+    fi
+
     if [[ ! -f "$PLAN" ]] || ! has_incomplete_tasks; then
         log ""
         log "── PLAN (cycle $CYCLE) ──"
@@ -463,6 +564,11 @@ while true; do
     while has_incomplete_tasks; do
         if [[ "$MAX_ITERATIONS" -gt 0 && "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then
             log "Max iterations reached ($MAX_ITERATIONS)."
+            log "Record: $RECORD_FILE"
+            exit 0
+        fi
+
+        if ! check_rate_limit; then
             log "Record: $RECORD_FILE"
             exit 0
         fi
