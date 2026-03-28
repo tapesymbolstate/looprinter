@@ -52,6 +52,26 @@ Or manually copy `loop.sh` and edit these functions:
 - `setup()` — one-time preprocessing
 - `POST_PHASES` + `gen_<name>_prompt()` — optional phases after verify passes
 
+## Loop Execution Protocol
+
+When asked to "run the loop":
+
+1. **Launch via cronjob**: Use `CronCreate` to schedule `./loop.sh claude [max_iterations]`
+   - Default interval: every 10 minutes (`*/10 * * * *`)
+   - loop.sh exits on completion, rate limit, or max iterations — the cronjob restarts it at the next interval
+   - Model override: `CLAUDE_MODEL=sonnet ./loop.sh claude` if requested
+
+2. **Outer loop** (this session): After creating the cronjob:
+   - Read `output/progress.txt` and latest `working-records/*.jsonl` to track progress
+   - If repeated failures detected, edit prompt functions in loop.sh
+   - Changes take effect on the next cronjob invocation (each iteration spawns a fresh agent)
+
+3. **Stop**: Use `CronDelete` to remove the cronjob when done or when manual intervention is needed.
+
+4. **Never run loop.sh in foreground** — it blocks the main session.
+
+Reference: [Claude Code Scheduled Tasks](https://docs.anthropic.com/en/docs/claude-code/scheduled-tasks)
+
 ## Rules
 
 - Keep prompt functions focused — one responsibility per phase
