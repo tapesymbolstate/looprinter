@@ -4,7 +4,7 @@ A loop template for building iterative agent harnesses. Copy `loop.sh`, edit the
 
 ## Core Concepts
 
-### 1. Ralph Loop
+### 1. [Ralph Loop](https://ghuntley.com/ralph/)
 
 ```
 while true:
