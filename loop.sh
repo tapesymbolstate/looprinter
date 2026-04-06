@@ -352,7 +352,6 @@ spawn_agent() {
         [[ "$TOOL" == "codex-spark" ]] && model="gpt-5.3-codex-spark"
         echo "$prompt" | codex exec \
             --sandbox danger-full-access \
-            -a never \
             --json \
             --model "$model" \
             2>&1 || true
