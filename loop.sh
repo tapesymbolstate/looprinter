@@ -368,6 +368,8 @@ spawn_agent() {
 
 log() { echo "$*"; }
 
+ensure_dirs() { mkdir -p "$WORK_DIR" "$RECORDS_DIR"; }
+
 has_incomplete_tasks() {
     [[ -f "$PLAN" ]] && $PYTHON -c "
 import json, sys
@@ -474,6 +476,7 @@ check_rate_limit() {
 run_post_phases() {
     [[ ${#POST_PHASES[@]} -eq 0 ]] && return 0
     for phase_name in "${POST_PHASES[@]}"; do
+        ensure_dirs
         log ""
         local phase_upper
         phase_upper=$(echo "$phase_name" | tr '[:lower:]' '[:upper:]')
@@ -521,6 +524,7 @@ setup
 
 while true; do
     CYCLE=$((CYCLE + 1))
+    ensure_dirs
 
     log ""
     log "════════════════════════════════════════"
