@@ -71,6 +71,7 @@ loop.sh                              — self-contained loop template (prompts +
 working-records/                     — JSONL logs from loop iterations (gitignored)
 output/                              — runtime artifacts produced by the loop (gitignored)
 .claude/skills/looprinter-interview/ — interactive harness configuration skill
+.claude/skills/looprinter-executor/  — loop execution and monitoring skill
 ```
 
 ## Artifact Contract
@@ -82,15 +83,35 @@ output/                              — runtime artifacts produced by the loop 
 
 ## Usage
 
+Two skills drive the workflow from a main Claude Code session:
+
+1. `/looprinter-interview` — interview the user, then write prompt functions and the `verify()` gate into `loop.sh`.
+2. `/looprinter-executor` — launch `loop.sh` as a cronjob, monitor `output/progress.txt` and `working-records/`, intervene by editing prompt functions when failures repeat, and stop the cron when done.
+
+Always run the loop through `/looprinter-executor` from a Claude Code session. Foreground execution blocks the session and breaks the double-loop pattern (the main agent can no longer observe `working-records/` or improve the harness).
+
+Direct shell invocation exists only for debugging the harness itself outside a Claude Code session:
+
 ```bash
-# Run directly
 ./loop.sh codex 50
 ./loop.sh codex-spark
 ./loop.sh claude 30
-
-# Run as background task from a main Claude Code session
-# The main agent monitors working-records/ and edits loop.sh to improve the harness
 ```
+
+## Porting to Another Project
+
+To use looprinter in a different project, copy these two paths into the target project root:
+
+```
+loop.sh
+.claude/skills/looprinter-executor/
+```
+
+Optionally also copy `.claude/skills/looprinter-interview/` if you want the interactive harness configurator in that project.
+
+Once copied, no edits to the target project's `CLAUDE.md` are required — both skills self-register via Claude Code's skill discovery and trigger on phrases like "run the loop", "execute", or "configure the loop". The first time you run `/looprinter-interview` in the new project, it writes the project-specific prompt functions and `verify()` gate into the copied `loop.sh`.
+
+Make sure `loop.sh` is executable (`chmod +x loop.sh`) and that the project's `.gitignore` excludes `output/` and `working-records/`.
 
 ## Building a New Harness
 

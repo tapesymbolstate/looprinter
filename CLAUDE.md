@@ -11,6 +11,7 @@ loop.sh                              — the template (prompts + engine in one f
 working-records/                     — JSONL logs per run [gitignored]
 output/                              — runtime artifacts (plan.json, progress.txt) [gitignored]
 .claude/skills/looprinter-interview/ — interactive harness configuration skill
+.claude/skills/looprinter-executor/  — loop execution and monitoring skill
 ```
 
 ## Core Concepts
@@ -52,25 +53,9 @@ Or manually copy `loop.sh` and edit these functions:
 - `setup()` — one-time preprocessing
 - `POST_PHASES` + `gen_<name>_prompt()` — optional phases after verify passes
 
-## Loop Execution Protocol
+## Running the Loop
 
-When asked to "run the loop":
-
-1. **Launch via cronjob**: Use `CronCreate` to schedule `./loop.sh claude [max_iterations]`
-   - Default interval: every 10 minutes (`*/10 * * * *`)
-   - loop.sh exits on completion, rate limit, or max iterations — the cronjob restarts it at the next interval
-   - Model override: `CLAUDE_MODEL=sonnet ./loop.sh claude` if requested
-
-2. **Outer loop** (this session): After creating the cronjob:
-   - Read `output/progress.txt` and latest `working-records/*.jsonl` to track progress
-   - If repeated failures detected, edit prompt functions in loop.sh
-   - Changes take effect on the next cronjob invocation (each iteration spawns a fresh agent)
-
-3. **Stop**: Use `CronDelete` to remove the cronjob when done or when manual intervention is needed.
-
-4. **Never run loop.sh in foreground** — it blocks the main session.
-
-Reference: [Claude Code Scheduled Tasks](https://docs.anthropic.com/en/docs/claude-code/scheduled-tasks)
+Use `/looprinter-executor` to launch, monitor, and manage the loop. Never run `loop.sh` in the foreground — it blocks the main session.
 
 ## Rules
 
