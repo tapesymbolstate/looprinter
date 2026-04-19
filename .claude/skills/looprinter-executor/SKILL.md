@@ -14,8 +14,8 @@ Before launching, verify in this order — stop and surface the issue to the use
 
 1. **`loop.sh` exists** at the project root (`ls loop.sh`). If missing, the project hasn't been set up with looprinter — direct the user to copy `loop.sh` and `.claude/skills/looprinter-executor/` from the looprinter repo (see its README's "Porting to Another Project" section). Do not attempt to recreate `loop.sh` from memory.
 2. **`loop.sh` is executable** (`test -x loop.sh`). If not, run `chmod +x loop.sh`.
-3. **Prompt functions are configured** — `gen_plan_prompt()`, `gen_build_prompt()`, `gen_replan_prompt()` should reflect the project's actual objective, not the default template placeholders. If they look generic, suggest running `/looprinter-interview` first.
-4. **Tool selected** — confirm which tool the user wants (`claude`, `codex`, `codex-spark`). Default to `claude` if unspecified.
+3. **Prompt functions are configured** — `gen_plan_prompt()`, `gen_build_prompt()`, `gen_replan_prompt()` should reflect the project's actual objective, not the default template placeholders. If they look generic, suggest configuring them before launch. If the `/looprinter-interview` skill is available (it's optional when porting looprinter), running it first is the easiest path; otherwise the user can edit the three prompt functions in `loop.sh` manually.
+4. **Tool selected** — confirm which tool the user wants (`claude`, `codex`, `codex-spark`). Default to `claude` if unspecified — matches `loop.sh`'s own default so behavior is the same whether launched via this skill or directly.
 
 ## Launch
 

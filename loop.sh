@@ -4,9 +4,9 @@
 # Usage: ./loop.sh [codex|codex-spark|claude] [max_iterations]
 #
 # Tools:
-#   codex       — Codex CLI with gpt-5.4 (default)
+#   claude      — Claude Code with opus (default; CLAUDE_MODEL=sonnet for Sonnet)
+#   codex       — Codex CLI with gpt-5.4
 #   codex-spark — Codex CLI with gpt-5.3-codex-spark (fast)
-#   claude      — Claude Code with opus (CLAUDE_MODEL=sonnet for Sonnet)
 #
 # Examples:
 #   ./loop.sh codex 50              — gpt-5.4, max 50 iterations
@@ -43,7 +43,7 @@ fi
 # ARG PARSING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-TOOL="codex"
+TOOL="claude"
 if [[ "${1:-}" =~ ^(codex|codex-spark|claude)$ ]]; then
     TOOL="$1"; shift
 fi
@@ -61,9 +61,6 @@ RATE_LIMIT_CACHE_TTL=60
 WORK_DIR="output"
 PLAN_FILE="$WORK_DIR/plan.json"
 PROGRESS_FILE="$WORK_DIR/progress.txt"
-
-PLAN="$PLAN_FILE"
-PROGRESS="$PROGRESS_FILE"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WORKING RECORDS
@@ -95,19 +92,19 @@ Schema:
    {
      "tasks": [
        { "id": "T-001", "title": "...", "description": "...",
-         "targetFile": "loop.sh", "passes": false, "notes": "..." }
+         "targetFile": "output/...", "passes": false, "notes": "..." }
      ]
    }
    ```
 
 5. Overwrite `output/plan.json` each run with the complete task list.
-6. Include one clear `<promise>PLAN_COMPLETE</promise>` signal only when schema is fully written.
 
 ## Rules
 - Use stable, unique IDs.
 - Use explicit ordering in the task array for build execution.
+
 ## Completion
-When done, output: <promise>PLAN_COMPLETE</promise>
+The phase finishes when `output/plan.json` is written. No end-of-output signal is required.
 PROMPT_EOF
 }
 
@@ -138,7 +135,7 @@ $build_errors
 4. Append cycle notes to \`output/progress.txt\`
 
 ## Completion
-When done, output: <promise>PLAN_COMPLETE</promise>
+The phase finishes when \`output/plan.json\` is written. No end-of-output signal is required.
 PROMPT_EOF
 }
 
@@ -165,12 +162,7 @@ You are a build agent. Execute one task from the plan.
 - ONE task per iteration
 - Update the plan JSON after completing each task
 - Do not reorder tasks.
-- Do not add extra non-task tasks.
-- If there are no incomplete tasks, output `<promise>CYCLE_DONE</promise>` immediately.
-
-## Completion
-If ALL tasks have `passes: true`, output: <promise>CYCLE_DONE</promise>
-Otherwise, complete your one task and exit.
+- Do not add tasks that are not in the plan.
 PROMPT_EOF
 }
 
@@ -188,7 +180,7 @@ verify() {
     echo "── VERIFY ──"
     local errors=()
 
-    if [ ! -d "output" ] || [ -z "$(ls output/ 2>/dev/null)" ]; then
+    if [ ! -d "$WORK_DIR" ] || [ -z "$(ls "$WORK_DIR"/ 2>/dev/null)" ]; then
         errors+=("No output files found.")
     fi
 
@@ -262,8 +254,6 @@ else:
                     errors.append(f"Task #{idx} field 'notes' must be a string.")
                 if "passes" in task and not isinstance(task["passes"], bool):
                     errors.append(f"Task #{idx} field 'passes' must be true or false.")
-                if "passes" in task and isinstance(task["passes"], bool) and task["passes"] and "targetFile" in task and not isinstance(task["targetFile"], str):
-                    errors.append(f"Task #{idx} passes=true but targetFile type is invalid; cannot validate completion state.")
 
 if errors:
     print("\n".join(errors))
@@ -320,12 +310,7 @@ PY
 
 setup() {
     echo "── SETUP ──"
-    mkdir -p output "$RECORDS_DIR"
-
-    PLAN_FILE="$WORK_DIR/plan.json"
-    PROGRESS_FILE="$WORK_DIR/progress.txt"
-    PROGRESS="$PROGRESS_FILE"
-    PLAN="$PLAN_FILE"
+    mkdir -p "$WORK_DIR" "$RECORDS_DIR"
 
     RATE_LIMIT_CACHE="/tmp/.loop_rate_limit_cache_${TOOL}"
     RECORD_FILE="$RECORDS_DIR/$(date '+%Y-%m-%d-%H%M%S')-loop-$TOOL.jsonl"
@@ -360,7 +345,6 @@ spawn_agent() {
             --model "${CLAUDE_MODEL:-opus}" \
             --effort "${CLAUDE_EFFORT:-max}" \
             --permission-mode bypassPermissions \
-            --dangerously-skip-permissions \
             --verbose --output-format stream-json \
             "$prompt" < /dev/null 2>&1 || true
     fi
@@ -371,18 +355,18 @@ log() { echo "$*"; }
 ensure_dirs() { mkdir -p "$WORK_DIR" "$RECORDS_DIR"; }
 
 has_incomplete_tasks() {
-    [[ -f "$PLAN" ]] && $PYTHON -c "
+    [[ -f "$PLAN_FILE" ]] && $PYTHON -c "
 import json, sys
-d = json.load(open('$PLAN'))
+d = json.load(open('$PLAN_FILE'))
 tasks = d.get('tasks', [])
 sys.exit(0 if any(not t.get('passes', False) for t in tasks) else 1)
 " 2>/dev/null
 }
 
 all_tasks_done() {
-    [[ -f "$PLAN" ]] && $PYTHON -c "
+    [[ -f "$PLAN_FILE" ]] && $PYTHON -c "
 import json, sys
-d = json.load(open('$PLAN'))
+d = json.load(open('$PLAN_FILE'))
 tasks = d.get('tasks', [])
 sys.exit(0 if tasks and all(t.get('passes', False) for t in tasks) else 1)
 " 2>/dev/null
@@ -538,7 +522,7 @@ while true; do
         exit 0
     fi
 
-    if [[ ! -f "$PLAN" ]] || ! has_incomplete_tasks; then
+    if [[ ! -f "$PLAN_FILE" ]] || ! has_incomplete_tasks; then
         log ""
         log "── PLAN (cycle $CYCLE) ──"
 
@@ -551,8 +535,8 @@ while true; do
         OUTPUT=$(spawn_agent "$PLAN_PROMPT")
         echo "$OUTPUT" | tee -a "$RECORD_FILE"
 
-        if [[ ! -f "$PLAN" ]]; then
-            log "Error: plan phase did not produce $PLAN"
+        if [[ ! -f "$PLAN_FILE" ]]; then
+            log "Error: plan phase did not produce $PLAN_FILE"
             exit 1
         fi
     fi
@@ -613,6 +597,6 @@ while true; do
     # ── FAIL → archive plan, re-plan next cycle ───────────────────────────
 
     log "Verification failed. Re-planning..."
-    cp "$PLAN" "$RECORDS_DIR/plan_cycle_${CYCLE}.json" 2>/dev/null || true
-    rm -f "$PLAN"
+    cp "$PLAN_FILE" "$RECORDS_DIR/plan_cycle_${CYCLE}.json" 2>/dev/null || true
+    rm -f "$PLAN_FILE"
 done

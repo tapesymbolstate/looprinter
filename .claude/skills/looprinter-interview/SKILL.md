@@ -154,12 +154,14 @@ Schema:
 - Use stable, unique IDs (T-001, T-002, ...).
 
 ## Completion
-When done, output: <promise>PLAN_COMPLETE</promise>
+The phase finishes when `output/plan.json` is written. No end-of-output signal is required.
 PROMPT_EOF
 }
 ```
 
 Key: The `## Objective` and `## Deliverables` sections come directly from the interview. Everything else is loop machinery that stays constant.
+
+Note: Plan/replan phases finish on `output/plan.json` existence (engine-enforced). Do NOT add `<promise>PLAN_COMPLETE</promise>` to these prompts — the engine ignores it, so it only invites confusion. Only the **build** phase uses a real signal (`<promise>CYCLE_DONE</promise>`, grep'd inside the build loop), and post-phases use their own `<PHASE>_DONE` / `<PHASE>_PROGRESS` signals.
 
 ### gen_build_prompt()
 
@@ -229,7 +231,7 @@ $build_errors
 - Tasks already completed (visible in progress.txt) should have passes: true.
 
 ## Completion
-When done, output: <promise>PLAN_COMPLETE</promise>
+The phase finishes when \`output/plan.json\` is written. No end-of-output signal is required.
 PROMPT_EOF
 }
 ```
