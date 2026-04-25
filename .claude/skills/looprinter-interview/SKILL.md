@@ -55,18 +55,25 @@ What artifacts must exist for verify() to pass?
 
 ```yaml
 questions:
-  - question: "Where should the loop write its output?"
+  - question: "Where should the loop write its deliverables?"
     header: "Output Location"
     options:
-      - label: "output/ only"
-        description: "All artifacts stay in the gitignored output directory"
-      - label: "Project files"
-        description: "Loop modifies actual project files (loop.sh, README, etc.)"
-      - label: "Both"
-        description: "Some in output/, some in the project"
+      - label: "output/ (gitignored sandbox)"
+        description: "All artifacts go under output/ — disposable, easy to wipe between runs"
+      - label: "Project root (committed)"
+        description: "Artifacts land at the repo root or in real project paths (src/, docs/, etc.) — meant to be committed"
+      - label: "Modify existing project files"
+        description: "Loop edits files already in the repo (loop.sh, README, source files)"
+      - label: "Mixed"
+        description: "Some artifacts in output/, others in project root or existing files"
 ```
 
-Get a concrete list of expected files and their formats.
+Follow up to nail down specifics:
+- Exact paths (e.g., `output/report.md` vs `./report.md` vs `src/foo.ts`)
+- Whether the path should be gitignored or tracked
+- File formats (JSON, Markdown, shell, etc.)
+
+This decision drives both the prompt (`targetFile` paths agents will write to) and verify() (which paths to check for existence).
 
 ### Stage 3: Verification
 
