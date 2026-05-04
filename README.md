@@ -45,16 +45,18 @@ The main agent reads `working-records/` from background loops, then **improves t
 └─────────────────────────────────────────────┘
 ```
 
-### 5. Exact Cycle Contract
+### 5. Two-Gate Cycle Contract — Cycle Verify + Key Objective
 
-`loop.sh` enforces a strict cycle order:
+`loop.sh` enforces a strict cycle order with **two completion gates**:
 
 1. `setup()` runs once, then the cycle starts.
 2. `Plan` runs when `output/plan.json` is missing or when all tasks are already complete.
 3. `Build` runs and repeatedly executes exactly one task per iteration.
-4. `Verify` checks required artifacts and schema invariants.
-5. On verify fail, the loop archives `output/plan.json` as `working-records/plan_cycle_<N>.json`, removes it, then re-plans next cycle with errors.
-6. On verify pass, configured post-phases run and then the loop exits.
+4. `Verify` (cycle-level) checks required artifacts and schema invariants — *did this cycle's plan execute correctly?*
+5. On cycle verify fail, the loop archives `output/plan.json` as `working-records/plan_cycle_<N>.json`, removes it, then re-plans next cycle with errors.
+6. On cycle verify pass, **`Verify Objective` (global)** runs — *is the key objective truly met?*
+7. On objective fail, the loop archives `output/plan.json` as `working-records/plan_cycle_<N>_objective_gap.json`, removes it, and re-plans the next increment with the gap injected into the replan prompt.
+8. On objective pass, configured post-phases run and then the loop exits.
 
 The build contract is one-task-per-iteration:
 
@@ -63,6 +65,12 @@ The build contract is one-task-per-iteration:
 - mark that single task as `passes: true`
 - append cumulative findings to `output/progress.txt`
 - finish the build iteration
+
+### 6. Key Objective — the global gate
+
+`KEY_OBJECTIVE` (a one-line string near the top of `loop.sh`) is the north star injected into every prompt and paired with `verify_objective()`. The loop will not exit until that function returns 0.
+
+Strict enforcement is opt-in: while the `LOOPRINTER_OBJECTIVE_TODO` marker remains inside `verify_objective()`, the gate passes through with a stderr warning so the raw template can still terminate on cycle verify alone. Removing the marker (which `/looprinter-interview` does automatically) activates the gate and turns the loop into "iterate until truly done."
 
 ## Structure
 
@@ -79,7 +87,8 @@ output/                              — runtime artifacts produced by the loop 
 - `output/plan.json` — object containing `tasks` array; each task has `id`, `title`, `description`, `targetFile`, `passes`, and `notes`.
 - `output/progress.txt` — cumulative findings and notes; must be non-empty for `verify()`.
 - `working-records/*.jsonl` — line-delimited records for each phase/output cycle.
-- `working-records/plan_cycle_*.json` — archived snapshots of `output/plan.json` when verify fails.
+- `working-records/plan_cycle_<N>.json` — archived plan when **cycle verify** failed (plan execution problem).
+- `working-records/plan_cycle_<N>_objective_gap.json` — archived plan when cycle verify passed but **`verify_objective()`** returned 1 (global gate not yet met). Filename suffix tells you which gate stopped the cycle.
 
 ## Usage
 
@@ -115,13 +124,15 @@ Make sure `loop.sh` is executable (`chmod +x loop.sh`) and that the project's `.
 
 ## Building a New Harness
 
-Use the `/looprinter-interview` skill to interactively configure a harness — it interviews you about your objective, then generates the prompt functions and verify() gate directly into `loop.sh`.
+Use the `/looprinter-interview` skill to interactively configure a harness — it interviews you about your key objective and cycle-level deliverables, then generates `KEY_OBJECTIVE`, `verify_objective()`, the prompt functions, and the per-cycle `verify()` gate directly into `loop.sh`.
 
-Or manually copy `loop.sh` and edit the functions:
+Or manually copy `loop.sh` and edit:
 
-- `gen_plan_prompt()` — what the planning agent should do
+- `KEY_OBJECTIVE` — one-line north star, injected into all prompts
+- `verify_objective()` — global completion gate (remove the `LOOPRINTER_OBJECTIVE_TODO` marker to activate)
+- `gen_plan_prompt()` — what the planning agent should do per cycle
 - `gen_build_prompt()` — what the build agent should do per task
-- `gen_replan_prompt()` — how to recover from verification failure
-- `verify()` — quality gates (exit 0 = pass)
+- `gen_replan_prompt()` — how to recover from cycle errors and/or close the objective gap
+- `verify()` — cycle-level quality gate (exit 0 = pass)
 - `setup()` — one-time preprocessing before the loop
-- `POST_PHASES` + `gen_<name>_prompt()` — optional phases after verify passes
+- `POST_PHASES` + `gen_<name>_prompt()` — optional phases that run after both gates pass

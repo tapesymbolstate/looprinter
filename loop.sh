@@ -52,6 +52,7 @@ MAX_ITERATIONS=${1:-0}
 ITERATION=0
 CYCLE=0
 BUILD_ERRORS=""
+OBJECTIVE_GAP=""
 
 # Rate limit gate — stop when Claude 5h utilization exceeds threshold (0=disabled)
 RATE_LIMIT_THRESHOLD=${RATE_LIMIT_THRESHOLD:-80}
@@ -70,10 +71,35 @@ RECORDS_DIR="working-records"
 RECORD_FILE=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# KEY OBJECTIVE — global completion criterion (north star)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# A one-line description of what "truly done" means for this loop. Two roles:
+#   1. Injected into every prompt (plan, build, replan) so each agent shares the
+#      same north star.
+#   2. Paired with verify_objective() as the global gate — the loop only exits
+#      when verify_objective() returns 0.
+#
+# Strict enforcement is opt-in. While the LOOPRINTER_OBJECTIVE_TODO marker is
+# present in verify_objective() below, that gate passes through with a stderr
+# warning so the raw template can still terminate on cycle verify alone.
+
+KEY_OBJECTIVE="TODO: describe what 'truly done' looks like for this loop"
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PROMPTS — edit these functions to customize the harness
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_objective_block() {
+    cat <<EOF
+## Key Objective (north star — the loop will not exit until this is met)
+$KEY_OBJECTIVE
+
+EOF
+}
+
 gen_plan_prompt() {
+    _objective_block
     cat <<'PROMPT_EOF'
 You are a planning agent. Read the project context and create a task plan.
 
@@ -111,17 +137,40 @@ PROMPT_EOF
 gen_replan_prompt() {
     local cycle_num="$1"
     local build_errors="$2"
+    local objective_gap="${3:-}"
+
+    _objective_block
 
     cat <<PROMPT_EOF
-You are a planning agent running cycle $cycle_num. The previous cycle had issues.
+You are a planning agent running cycle $cycle_num. The previous cycle did not finish the job.
+PROMPT_EOF
 
-## Previous errors
+    if [[ -n "$build_errors" ]]; then
+        cat <<PROMPT_EOF
+
+## Previous cycle errors (cycle-level verify failed)
 \`\`\`
 $build_errors
 \`\`\`
+PROMPT_EOF
+    fi
+
+    if [[ -n "$objective_gap" ]]; then
+        cat <<PROMPT_EOF
+
+## Key objective gap (cycle verify passed, objective not yet met)
+The previous cycle's plan completed and passed cycle verification, but the global
+key objective is still not met. Plan the next increment of work to close this gap:
+\`\`\`
+$objective_gap
+\`\`\`
+PROMPT_EOF
+    fi
+
+    cat <<PROMPT_EOF
 
 ## Job
-1. Read \`output/progress.txt\` for context on what was already done
+1. Read \`output/progress.txt\` for context on what was already done.
 2. Generate a NEW \`output/plan.json\` for cycle $cycle_num with schema:
    \`\`\`json
    {
@@ -131,8 +180,9 @@ $build_errors
      ]
    }
    \`\`\`
-3. Fix the issues from the previous cycle
-4. Append cycle notes to \`output/progress.txt\`
+3. Address the cycle errors and/or objective gap above; do not re-do work already
+   marked done in progress.txt.
+4. Append cycle notes to \`output/progress.txt\`.
 
 ## Completion
 The phase finishes when \`output/plan.json\` is written. No end-of-output signal is required.
@@ -140,6 +190,7 @@ PROMPT_EOF
 }
 
 gen_build_prompt() {
+    _objective_block
     cat <<'PROMPT_EOF'
 You are a build agent. Execute one task from the plan.
 
@@ -301,6 +352,51 @@ PY
 
     echo "PASS"
     BUILD_ERRORS=""
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VERIFY OBJECTIVE — global completion gate (key objective)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Distinct from verify(): verify() asks "did this cycle's plan execute correctly?",
+# verify_objective() asks "is the key objective truly met?". The loop only exits
+# when BOTH return 0; if cycle verify passes but verify_objective fails, the loop
+# archives the plan and re-plans the next increment toward the objective.
+#
+# While the LOOPRINTER_OBJECTIVE_TODO marker is present in this function body,
+# the gate passes through with a stderr warning so the raw template can still
+# terminate. The /looprinter-interview skill removes this guard automatically
+# when generating real checks.
+#
+# When returning 1, populate OBJECTIVE_GAP with a description of what is missing —
+# the next cycle's gen_replan_prompt() injects it into the planning context.
+
+verify_objective() {
+    echo "── VERIFY OBJECTIVE ──"
+
+    if grep -q "LOOPRINTER_OBJECTIVE_TODO" <<< "$(declare -f verify_objective)"; then
+        echo "⚠ verify_objective() not configured (LOOPRINTER_OBJECTIVE_TODO marker present)" >&2
+        echo "  Loop will exit on cycle verify alone. Define checks here to enforce 'truly done'." >&2
+        OBJECTIVE_GAP=""
+        return 0
+    fi
+
+    # === Real objective checks go here ===
+    # Pattern: collect gaps into an array, set OBJECTIVE_GAP and return 1 if any.
+    #
+    #   local gaps=()
+    #   [[ ! -f "output/final_report.md" ]] && gaps+=("output/final_report.md missing")
+    #   grep -q "PASS" output/test_summary.txt 2>/dev/null \
+    #       || gaps+=("test_summary.txt does not contain PASS")
+    #   if [[ ${#gaps[@]} -gt 0 ]]; then
+    #       OBJECTIVE_GAP=$(printf '%s\n' "${gaps[@]}")
+    #       echo "GAP: $OBJECTIVE_GAP"
+    #       return 1
+    #   fi
+
+    OBJECTIVE_GAP=""
+    echo "MET"
     return 0
 }
 
@@ -526,8 +622,8 @@ while true; do
         log ""
         log "── PLAN (cycle $CYCLE) ──"
 
-        if [[ -n "$BUILD_ERRORS" ]]; then
-            PLAN_PROMPT=$(gen_replan_prompt "$CYCLE" "$BUILD_ERRORS")
+        if [[ -n "$BUILD_ERRORS" || -n "$OBJECTIVE_GAP" ]]; then
+            PLAN_PROMPT=$(gen_replan_prompt "$CYCLE" "$BUILD_ERRORS" "$OBJECTIVE_GAP")
         else
             PLAN_PROMPT=$(gen_plan_prompt)
         fi
@@ -580,18 +676,29 @@ while true; do
         fi
     done
 
-    # ── VERIFY ────────────────────────────────────────────────────────────
+    # ── VERIFY (cycle-level) ──────────────────────────────────────────────
 
     log ""
     if verify; then
-        run_post_phases
-
+        # ── VERIFY OBJECTIVE (global) ─────────────────────────────────────
         log ""
-        log "════════════════════════════════════════"
-        log "  DONE"
-        log "════════════════════════════════════════"
-        log "Record: $RECORD_FILE"
-        exit 0
+        if verify_objective; then
+            run_post_phases
+
+            log ""
+            log "════════════════════════════════════════"
+            log "  DONE"
+            log "════════════════════════════════════════"
+            log "Record: $RECORD_FILE"
+            exit 0
+        fi
+
+        log "Cycle complete but key objective not yet met. Re-planning toward objective."
+        cp "$PLAN_FILE" "$RECORDS_DIR/plan_cycle_${CYCLE}_objective_gap.json" 2>/dev/null || true
+        rm -f "$PLAN_FILE"
+        BUILD_ERRORS=""
+        # OBJECTIVE_GAP is already set by verify_objective; carry into next cycle's replan.
+        continue
     fi
 
     # ── FAIL → archive plan, re-plan next cycle ───────────────────────────
@@ -599,4 +706,5 @@ while true; do
     log "Verification failed. Re-planning..."
     cp "$PLAN_FILE" "$RECORDS_DIR/plan_cycle_${CYCLE}.json" 2>/dev/null || true
     rm -f "$PLAN_FILE"
+    OBJECTIVE_GAP=""
 done
